@@ -1,9 +1,6 @@
 import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-
-const CARRIER_NAME = "Custom Carrier Service";
-const FULFILLMENT_NAME = "Custom Fulfillment Service";
 const CALLBACK_URL = "https://revised-tremendous-walker-looking.trycloudflare.com";
 
 async function resolveCarrierService(admin) {
@@ -19,7 +16,7 @@ async function resolveCarrierService(admin) {
     {
       variables: {
         input: {
-          name: CARRIER_NAME,
+          name: "Custom Carrier Service",
           callbackUrl:
             "https://jurisdiction-england-airlines-place.trycloudflare.com/carrier-service",
           active: true,
@@ -44,12 +41,12 @@ async function resolveCarrierService(admin) {
       }
     }
     `,
-    { variables: { query: `name:${CARRIER_NAME}` } }
+    { variables: { query: `name:"Custom Carrier Service"` } }
   );
 
   const listJson = await listRes.json();
   const found = listJson.data?.carrierServices?.edges?.find(
-    (e) => e.node.name === CARRIER_NAME
+    (e) => e.node.name === "Custom Carrier Service"
   );
 
   if (!found) {
@@ -78,7 +75,7 @@ async function resolveFulfillmentService(admin) {
       }
     }
     `,
-    { variables: { name: FULFILLMENT_NAME, callbackUrl: CALLBACK_URL } }
+    { variables: { name: "Custom Fulfillment Service", callbackUrl: CALLBACK_URL } }
   );
 
   const json = await res.json();
@@ -103,7 +100,7 @@ async function resolveFulfillmentService(admin) {
 
   const listJson = await listRes.json();
   const existing = listJson.data?.shop?.fulfillmentServices?.find(
-    (fs) => fs.serviceName === FULFILLMENT_NAME
+    (fs) => fs.serviceName === "Custom Fulfillment Service"
   );
 
   if (!existing) {
