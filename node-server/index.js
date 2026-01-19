@@ -86,9 +86,9 @@ server.post("/carrier-service", async (req, res) => {
 
     if (itemCount >= 3) {
       responseRates.push({
-        service_name: "Fast Delivery",
-        service_code: "FAST",
-        description: "Fastest available shipping",
+        service_name: "Quick Delivery",
+        service_code: "QUICK",
+        description: "Quick shipping",
         total_price: "1000",
         currency,
         min_delivery_date: addDays(1),
