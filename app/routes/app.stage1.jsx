@@ -1,162 +1,281 @@
 import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-const CALLBACK_URL = "https://revised-tremendous-walker-looking.trycloudflare.com";
 
-async function resolveCarrierService(admin) {
-  const res = await admin.graphql(
-    `
-    mutation CreateCarrier($input: DeliveryCarrierServiceCreateInput!) {
-      carrierServiceCreate(input: $input) {
-        carrierService { id name }
-        userErrors { message }
-      }
-    }
-    `,
-    {
-      variables: {
-        input: {
-          name: "Custom Carrier Service",
-          callbackUrl:
-            "https://jurisdiction-england-airlines-place.trycloudflare.com/carrier-service",
-          active: true,
-          supportsServiceDiscovery: true,
-        },
-      },
-    }
-  );
-
-  const json = await res.json();
-  const payload = json.data?.carrierServiceCreate;
-
-  if (payload?.carrierService?.id) {
-    return payload.carrierService.id;
-  }
-
-  const listRes = await admin.graphql(
-    `
-    query CarrierLookup($query: String!) {
-      carrierServices(first: 25, query: $query) {
-        edges { node { id name } }
-      }
-    }
-    `,
-    { variables: { query: `name:"Custom Carrier Service"` } }
-  );
-
-  const listJson = await listRes.json();
-  const found = listJson.data?.carrierServices?.edges?.find(
-    (e) => e.node.name === "Custom Carrier Service"
-  );
-
-  if (!found) {
-    throw new Error("Unable to resolve carrier service");
-  }
-
-  return found.node.id;
-}
-
-async function resolveFulfillmentService(admin) {
-  const res = await admin.graphql(
-    `
-    mutation CreateFulfillment(
-      $name: String!
-      $callbackUrl: URL!
-    ) {
-      fulfillmentServiceCreate(
-        name: $name
-        callbackUrl: $callbackUrl
-        trackingSupport: true
-        inventoryManagement: true
-        requiresShippingMethod: true
-      ) {
-        fulfillmentService { id serviceName }
-        userErrors { message }
-      }
-    }
-    `,
-    { variables: { name: "Custom Fulfillment Service", callbackUrl: CALLBACK_URL } }
-  );
-
-  const json = await res.json();
-  const payload = json.data?.fulfillmentServiceCreate;
-
-  if (payload?.fulfillmentService?.id) {
-    return payload.fulfillmentService.id;
-  }
-
-  const listRes = await admin.graphql(
-    `
-    query FulfillmentLookup {
-      shop {
-        fulfillmentServices {
-          id
-          serviceName
-        }
-      }
-    }
-    `
-  );
-
-  const listJson = await listRes.json();
-  const existing = listJson.data?.shop?.fulfillmentServices?.find(
-    (fs) => fs.serviceName === "Custom Fulfillment Service"
-  );
-
-  if (!existing) {
-    throw new Error("Unable to resolve fulfillment service");
-  }
-
-  return existing.id;
-}
-
-async function createOrderWebhook(admin) {
-  const res = await admin.graphql(
-    `
-    mutation RegisterWebhook($callbackUrl: URL!) {
-      webhookSubscriptionCreate(
-        topic: ORDERS_CREATE
-        webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }
-      ) {
-        webhookSubscription { id }
-        userErrors { message }
-      }
-    }
-    `,
-    { variables: { callbackUrl: CALLBACK_URL } }
-  );
-
-  const json = await res.json();
-  const payload = json.data?.webhookSubscriptionCreate;
-
-  if (!payload?.webhookSubscription?.id) {
-    throw new Error("Webhook creation failed");
-  }
-
-  return payload.webhookSubscription.id;
-}
+const CALLBACK_URL = "https://stream-eternal-schema-necessity.trycloudflare.com";
 
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const saved = await db.shopSetup.findUnique({ where: { shop } });
+  const existingSetup = await db.shopSetup.findUnique({
+    where: { shop },
+  });
 
-  if (saved?.step1Completed) {
-    return Response.json({
-      success: true,
-      message: "created Successfully",
-    });
+  let carrierServiceId = existingSetup?.carrierServiceId ?? null;
+  let fulfillmentServiceId = existingSetup?.fulfillmentServiceId ?? null;
+  let orderWebhookId = existingSetup?.orderWebhookId ?? null;
+
+  if (
+    existingSetup?.step1Completed &&
+    carrierServiceId &&
+    fulfillmentServiceId &&
+    orderWebhookId
+  ) {
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message: "created successfully",
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    );
   }
 
-  const carrierServiceId =
-    saved?.carrierServiceId ?? (await resolveCarrierService(admin));
+  if (!orderWebhookId) {
+    const webhookRes = await admin.graphql(
+      `
+      mutation WebhookSubscriptionCreate($callbackUrl: URL!) {
+        webhookSubscriptionCreate(
+          topic: ORDERS_CREATE
+          webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }
+        ) {
+          webhookSubscription {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+      {
+        variables: {
+          callbackUrl: CALLBACK_URL,
+        },
+      },
+    );
 
-  const fulfillmentServiceId =
-    saved?.fulfillmentServiceId ?? (await resolveFulfillmentService(admin));
+    const webhookData = await webhookRes.json();
 
-  const orderWebhookId =
-    saved?.orderWebhookId ?? (await createOrderWebhook(admin));
+    const webhookPayload = webhookData.data?.webhookSubscriptionCreate;
+
+    if (!webhookPayload) {
+      throw new Error("Failed to create order webhook: No payload returned");
+    }
+
+    if (webhookPayload.userErrors?.length) {
+      console.error("Webhook create userErrors:", webhookPayload.userErrors);
+      throw new Error(
+        "Failed to create order webhook: " +
+          webhookPayload.userErrors.map((e) => e.message).join("; "),
+      );
+    }
+
+    orderWebhookId = webhookPayload.webhookSubscription.id;
+  }
+
+  if (!fulfillmentServiceId) {
+    const fulfillmentRes = await admin.graphql(
+      `
+      mutation FulfillmentServiceCreate(
+        $name: String!
+        $callbackUrl: URL!
+        $trackingSupport: Boolean
+        $inventoryManagement: Boolean
+        $requiresShippingMethod: Boolean
+      ) {
+        fulfillmentServiceCreate(
+          name: $name
+          callbackUrl: $callbackUrl
+          trackingSupport: $trackingSupport
+          inventoryManagement: $inventoryManagement
+          requiresShippingMethod: $requiresShippingMethod
+        ) {
+          fulfillmentService {
+            id
+            serviceName
+            callbackUrl
+            inventoryManagement
+            trackingSupport
+            requiresShippingMethod
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+      {
+        variables: {
+          name: "Custom Fulfillment Service",
+          callbackUrl: CALLBACK_URL,
+          trackingSupport: true,
+          inventoryManagement: true,
+          requiresShippingMethod: true,
+        },
+      },
+    );
+
+    const fulfillmentData = await fulfillmentRes.json();
+    const fulfillmentPayload = fulfillmentData.data?.fulfillmentServiceCreate;
+
+    if (!fulfillmentPayload) {
+      throw new Error(
+        "Failed to create fulfillment service: No payload returned",
+      );
+    }
+
+    const fulfillmentUserErrors = fulfillmentPayload.userErrors ?? [];
+
+    if (fulfillmentUserErrors.length > 0) {
+      const messages = fulfillmentUserErrors.map((e) => e.message);
+      const nameTaken = messages.some((m) =>
+        m.toLowerCase().includes("name has already been taken"),
+      );
+
+      if (!nameTaken) {
+        throw new Error(
+          "Failed to create fulfillment service: " + messages.join("; "),
+        );
+      }
+
+      const fulfillmentListRes = await admin.graphql(
+        `
+        query FulfillmentServiceList {
+          shop {
+            fulfillmentServices {
+              id
+              callbackUrl
+              fulfillmentOrdersOptIn
+              permitsSkuSharing
+              handle
+              inventoryManagement
+              serviceName
+            }
+          }
+        }
+      `,
+      );
+
+      const fulfillmentListData = await fulfillmentListRes.json();
+      const fsNodes = fulfillmentListData.data?.shop?.fulfillmentServices ?? [];
+
+      const existingFs = fsNodes.find(
+        (fs) => fs.serviceName === "Custom Fulfillment Service",
+      );
+      if (!existingFs) {
+        throw new Error(
+          "Fulfillment service name reported as 'already taken' but could not be found via shop.fulfillmentServices.",
+        );
+      }
+      fulfillmentServiceId = existingFs.id;
+    } else {
+      fulfillmentServiceId = fulfillmentPayload.fulfillmentService.id;
+    }
+  }
+
+  if (!carrierServiceId) {
+    const carrierRes = await admin.graphql(
+      `
+      mutation CarrierServiceCreate(
+        $input: DeliveryCarrierServiceCreateInput!
+      ) {
+        carrierServiceCreate(input: $input) {
+          carrierService {
+            id
+            name
+            active
+            callbackUrl
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+      {
+        variables: {
+          input: {
+            name: "Custom Carrier Service",
+            callbackUrl:
+              "https://maritime-vacations-packard-quilt.trycloudflare.com/carrier-service",
+            active: true,
+            supportsServiceDiscovery: true,
+          },
+        },
+      },
+    );
+
+    const carrierData = await carrierRes.json();
+    console.dir(carrierData, { depth: null });
+
+    const carrierPayload = carrierData.data?.carrierServiceCreate;
+    if (!carrierPayload) {
+      throw new Error("Failed to create carrier service: No payload returned");
+    }
+
+    const carrierUserErrors = carrierPayload.userErrors ?? [];
+
+    if (carrierUserErrors.length > 0) {
+      console.error("Carrier service create userErrors:", carrierUserErrors);
+
+      const messages = carrierUserErrors.map((e) => e.message);
+      const alreadyConfigured = messages.some((m) =>
+        m.toLowerCase().includes("already configured"),
+      );
+
+      if (!alreadyConfigured) {
+        throw new Error(
+          "Failed to create carrier service: " + messages.join("; "),
+        );
+      }
+      const carrierListRes = await admin.graphql(
+        `
+        query CarrierServices($first: Int!, $query: String) {
+          carrierServices(first: $first, query: $query) {
+            edges {
+              node {
+                id
+                name
+                active
+                callbackUrl
+              }
+            }
+          }
+        }
+      `,
+        {
+          variables: {
+            first: 50,
+            query: `name:"Custom Carrier Service"`,
+          },
+        },
+      );
+
+      const carrierListData = await carrierListRes.json();
+      const carrierNodes =
+        carrierListData.data?.carrierServices?.edges?.map(
+          (edge) => edge.node,
+        ) ?? [];
+
+      const existingCarrier = carrierNodes.find(
+        (c) => c.name === "Custom Carrier Service",
+      );
+
+      if (!existingCarrier) {
+        throw new Error(
+          "Carrier service reported as 'already configured' but could not be found via carrierServices query.",
+        );
+      }
+
+      carrierServiceId = existingCarrier.id;
+    } else {
+      carrierServiceId = carrierPayload.carrierService.id;
+    }
+  }
 
   await db.shopSetup.upsert({
     where: { shop },
@@ -175,78 +294,97 @@ export const action = async ({ request }) => {
     },
   });
 
-  return Response.json({
-    success: true,
-    message: "Step 1 completed successfully",
-  });
+  return new Response(
+    JSON.stringify({
+      success: true,
+      message: "created successfully",
+    }),
+    { headers: { "Content-Type": "application/json" } },
+  );
 };
+
 export default function Step1() {
   const fetcher = useFetcher();
-  const loading = fetcher.state !== "idle";
+  const isLoading = fetcher.state === "submitting";
 
   return (
     <div
       style={{
         minHeight: "100vh",
+        backgroundColor: "#f5f7fb",
         display: "flex",
         justifyContent: "center",
         alignItems: "center",
-        background: "#f5f7fb",
+        padding: "24px",
       }}
     >
       <div
         style={{
           width: "100%",
-          maxWidth: 520,
+          maxWidth: "520px",
           background: "#ffffff",
-          padding: 32,
-          borderRadius: 12,
+          borderRadius: "12px",
+          padding: "28px",
           boxShadow: "0 10px 25px rgba(0,0,0,0.08)",
         }}
       >
-        <h2 style={{ marginBottom: 8 }}>Initial Setup</h2>
-        <p style={{ marginBottom: 24, color: "#555" }}>
-          complete stage to see essential services for your store.
+        <h2 style={{ marginBottom: "6px" }}>Setup</h2>
+        <p style={{ marginBottom: "20px", color: "#555" }}>
+          This step initializes required services.
         </p>
 
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ marginBottom: 10 }}>Carrier service</div>
-          <div style={{ marginBottom: 10 }}>Fulfillment service</div>
-          <div>Order creation webhook</div>
+        <div
+          style={{
+            background: "#f1f5f9",
+            borderRadius: "8px",
+            padding: "16px",
+            marginBottom: "20px",
+          }}
+        >
+          <p style={{ marginBottom: "10px", fontWeight: 600 }}>
+            
+          </p>
+          <ul style={{ margin: 0, paddingLeft: "18px", color: "#374151" }}>
+            <li>Carrier Service</li>
+            <li>Fulfillment Service</li>
+            <li>Order Creation Webhook</li>
+          </ul>
         </div>
 
         <fetcher.Form method="post">
           <button
             type="submit"
-            disabled={loading}
+            disabled={isLoading}
             style={{
               width: "100%",
               padding: "12px",
-              fontSize: 16,
+              fontSize: "15px",
               fontWeight: 600,
-              backgroundColor: loading ? "#888" : "#000",
-              color: "#fff",
+              borderRadius: "8px",
               border: "none",
-              borderRadius: 6,
-              cursor: loading ? "not-allowed" : "pointer",
+              backgroundColor: isLoading ? "#9ca3af" : "#111827",
+              color: "#ffffff",
+              cursor: isLoading ? "not-allowed" : "pointer",
             }}
           >
-            {loading ? "Initializing services..." : "Start Setup"}
+            {isLoading ? "Setting up services..." : "Start Setup"}
           </button>
         </fetcher.Form>
 
         {fetcher.data?.success && (
           <div
             style={{
-              marginTop: 16,
-              padding: 12,
-              background: "#e6fffa",
+              marginTop: "16px",
+              padding: "10px",
+              borderRadius: "6px",
+              background: "#ecfdf5",
               color: "#065f46",
-              borderRadius: 6,
               textAlign: "center",
+              fontSize: "14px",
+              fontWeight: 500,
             }}
           >
-            {fetcher.data.message}
+            {fetcher.data.message ?? "Step 1 completed successfully"}
           </div>
         )}
       </div>
